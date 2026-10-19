@@ -68,15 +68,6 @@ if not api_key:
 # --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-def get_all_worksheets():
-    """Reads available worksheets/tabs from Google Sheets or defaults to Sheet1."""
-    try:
-        # Load default sheet to inspect structure or list sheets
-        # If gsheets_connection allows reading worksheet names, we use fallback list
-        return ["Sheet1", "General", "Verbs", "Nouns", "Phrases"]
-    except Exception:
-        return ["Sheet1"]
-
 def load_vocab_from_worksheet(worksheet_name="Sheet1"):
     """Reads vocabulary from a specific tab/worksheet in Google Sheets."""
     try:
@@ -94,12 +85,11 @@ def load_vocab_from_worksheet(worksheet_name="Sheet1"):
             return df
         return pd.DataFrame(columns=['Dutch', 'English'])
     except Exception:
-        # Fallback if worksheet doesn't exist yet
         return pd.DataFrame(columns=['Dutch', 'English'])
 
 # --- SESSION STATE INITIALIZATION ---
 if "available_sheets" not in st.session_state:
-    st.session_state.available_sheets = ["Sheet1"]
+    st.session_state.available_sheets = ["Sheet1", "General", "Verbs", "Nouns", "Phrases"]
 
 if "selected_worksheet" not in st.session_state:
     st.session_state.selected_worksheet = st.session_state.available_sheets[0]
@@ -178,6 +168,35 @@ if selected_sheet != st.session_state.selected_worksheet:
     st.session_state.selected_worksheet = selected_sheet
     st.rerun()
 
+# --- SIDEBAR: RENAME CURRENT SHEET ---
+with st.sidebar.expander("✏️ **Rename Current Sheet**"):
+    renamed_input = st.text_input("New Name for Active Sheet", value=st.session_state.selected_worksheet)
+    if st.button("Save New Sheet Name"):
+        clean_renamed = renamed_input.strip()
+        if not clean_renamed:
+            st.warning("Please enter a valid sheet name.")
+        elif clean_renamed == st.session_state.selected_worksheet:
+            st.info("The name is identical to the current name.")
+        elif clean_renamed in st.session_state.available_sheets:
+            st.warning(f"A sheet named '{clean_renamed}' already exists.")
+        else:
+            old_name = st.session_state.selected_worksheet
+            try:
+                # Copy current dataframe over to new worksheet name
+                conn.update(worksheet=clean_renamed, data=active_df)
+                # Clear old worksheet
+                conn.update(worksheet=old_name, data=pd.DataFrame(columns=['Dutch', 'English']))
+                
+                # Update list in session state
+                idx = st.session_state.available_sheets.index(old_name)
+                st.session_state.available_sheets[idx] = clean_renamed
+                st.session_state.selected_worksheet = clean_renamed
+                
+                st.success(f"Renamed sheet **'{old_name}'** to **'{clean_renamed}'**!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error renaming worksheet: {e}")
+
 # --- SIDEBAR: CREATE NEW SHEET / CATEGORY ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Create New Sheet / Category")
@@ -190,7 +209,6 @@ if st.sidebar.button("Create Sheet Tab"):
     elif clean_sheet_name in st.session_state.available_sheets:
         st.sidebar.warning(f"Sheet '{clean_sheet_name}' already exists.")
     else:
-        # Initialize empty dataframe with standard headers for the new tab
         empty_df = pd.DataFrame(columns=['Dutch', 'English'])
         try:
             conn.update(worksheet=clean_sheet_name, data=empty_df)
@@ -256,7 +274,7 @@ if st.session_state.app_mode == "🏠 Home Dashboard":
             st.rerun()
 
 # ==========================================
-# 1. LEARNING MODE (VOCABULARY BROWSER V4)
+# 1. LEARNING MODE (VOCABULARY BROWSER V4.1)
 # ==========================================
 elif st.session_state.app_mode == "📚 Vocabulary Browser":
     st.header(f"📚 Worksheet: '{st.session_state.selected_worksheet}'")

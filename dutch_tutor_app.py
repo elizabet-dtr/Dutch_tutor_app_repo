@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import os
 import json
 import random
 from google import genai
 from google.genai import types
+from streamlit_gsheets import GSheetsConnection
 
 # --- PAGE CONFIGURATION & CLEAN NEUTRAL STYLING ---
 st.set_page_config(page_title="My Dutch Studio", page_icon="🇳🇱", layout="centered")
@@ -14,7 +14,7 @@ st.markdown("""
     .stApp {
         background-color: #f7f9fb;
     }
-
+    
     h1, h2, h3 {
         color: #2c3e50;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -54,39 +54,34 @@ except Exception:
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- ABSOLUTE PATH TO PREVENT CSV MISPLACEMENT ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-default_csv = os.path.join(BASE_DIR, "dutch_vocab.csv")
+# --- GOOGLE SHEETS DATA LOADING & SYNC ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_vocab():
-    if os.path.exists(default_csv):
-        try:
-            with open(default_csv, 'r', encoding='utf-8') as f:
-                first_line = f.readline()
-            sep = ';' if ';' in first_line else ','
-
-            df = pd.read_csv(default_csv, sep=sep, engine='python', on_bad_lines='skip')
-
-            if df is not None and not df.empty:
-                if len(df.columns) >= 3:
-                    df = df.iloc[:, :3]
-                    df.columns = ['Dutch', 'English', 'Category']
-                elif len(df.columns) == 2:
-                    df = df.iloc[:, :2]
-                    df.columns = ['Dutch', 'English']
-                    df['Category'] = 'General'
-                else:
-                    df['English'] = ''
-                    df['Category'] = 'General'
-                    df.columns = ['Dutch', 'English', 'Category']
+    try:
+        # Read live data from Google Sheet with caching disabled for fresh updates
+        df = conn.read(ttl=0)
+        if df is not None and not df.empty:
+            if len(df.columns) >= 3:
+                df = df.iloc[:, :3]
+                df.columns = ['Dutch', 'English', 'Category']
+            elif len(df.columns) == 2:
+                df = df.iloc[:, :2]
+                df.columns = ['Dutch', 'English']
+                df['Category'] = 'General'
+            else:
+                df['English'] = ''
+                df['Category'] = 'General'
+                df.columns = ['Dutch', 'English', 'Category']
 
             df['Dutch'] = df['Dutch'].astype(str).str.strip()
             df['English'] = df['English'].astype(str).str.strip()
             df['Category'] = df['Category'].astype(str).str.strip().replace('', 'General')
             return df
-        except Exception:
-            return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
-    return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
+        return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
+    except Exception as e:
+        st.error(f"Error connecting to Google Sheets: {e}")
+        return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
 
 df = load_vocab()
 
@@ -143,7 +138,7 @@ if st.sidebar.button("Translate & Check"):
         except Exception as e:
             st.sidebar.error(f"Lookup error (Rate limit or quota reached): {e}")
 
-# --- ADD NEW WORD FORM (WITH ABSOLUTE PATH & RELOAD) ---
+# --- ADD NEW WORD FORM (SAVES DIRECTLY TO GOOGLE SHEETS) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Add New Word & List")
 
@@ -152,10 +147,10 @@ existing_categories = sorted(df['Category'].unique().tolist()) if not df.empty a
 with st.sidebar.form(key="add_word_form", clear_on_submit=False):
     new_dutch = st.text_input("Dutch Word / Phrase *")
     new_english = st.text_input("English Translation *")
-
+    
     category_choice = st.selectbox("Select or Create List/Category", existing_categories + ["➕ Add New Category..."])
     new_category_input = st.text_input("New Category Name (if selected above)")
-
+    
     add_btn = st.form_submit_button("Save Word")
 
     if add_btn:
@@ -165,9 +160,10 @@ with st.sidebar.form(key="add_word_form", clear_on_submit=False):
         if not new_english.strip():
             errors.append("English translation is missing.")
 
-        clean_dutch = new_dutch.strip().replace(';', '')
-        clean_english = new_english.strip().replace(';', '')
+        clean_dutch = new_dutch.strip()
+        clean_english = new_english.strip()
 
+        # Check for duplicate Dutch words (case-insensitive)
         if not errors and not df.empty and 'Dutch' in df.columns:
             existing_dutch_words = df['Dutch'].astype(str).str.strip().str.lower().tolist()
             if clean_dutch.lower() in existing_dutch_words:
@@ -178,34 +174,18 @@ with st.sidebar.form(key="add_word_form", clear_on_submit=False):
                 st.sidebar.warning(f"⚠️ {err}")
         else:
             if category_choice == "➕ Add New Category...":
-                final_category = new_category_input.strip().replace(';', '') if new_category_input.strip() else "General"
+                final_category = new_category_input.strip() if new_category_input.strip() else "General"
             else:
                 final_category = category_choice
 
             new_row = pd.DataFrame([{'Dutch': clean_dutch, 'English': clean_english, 'Category': final_category}])
+            updated_df = pd.concat([df, new_row], ignore_index=True)
+            
+            # Write back to Google Sheet
+            conn.update(data=updated_df)
 
-            if os.path.exists(default_csv):
-                updated_df = pd.concat([df, new_row], ignore_index=True)
-            else:
-                updated_df = new_row
-
-            updated_df.to_csv(default_csv, index=False, sep=';')
-
-            st.sidebar.success(f"Added successfully: **{clean_dutch}** = *{clean_english}* [{final_category}]!")
+            st.sidebar.success(f"Added successfully to cloud: **{clean_dutch}** = *{clean_english}* [{final_category}]!")
             st.rerun()
-
-# --- BACKUP / SYNC TOOL (PREVENTS DATA LOSS ON REDEPLOY) ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("💾 Cloud Data Backup")
-if os.path.exists(default_csv):
-    with open(default_csv, "rb") as f:
-        st.sidebar.download_button(
-            label="📥 Download Latest CSV",
-            data=f,
-            file_name="dutch_vocab.csv",
-            mime="text/csv",
-            help="Download the current vocabulary file containing all words added on the live app."
-        )
 
 # --- SIDEBAR: CATEGORY FILTER FOR STUDY MODES ---
 st.sidebar.markdown("---")
@@ -229,7 +209,7 @@ if "flashcard_order" not in st.session_state or len(st.session_state.flashcard_o
 # MAIN APP LOGIC
 # ==========================================
 if df.empty:
-    st.warning("⚠️ Your vocabulary file is empty or missing. Use the sidebar on the left to add your first word and start your studio!")
+    st.warning("⚠️ Your vocabulary sheet is empty or connecting. Use the sidebar on the left to add your first word or check your Google Sheet connection!")
 else:
     if st.session_state.app_mode == "🏠 Home Dashboard":
         st.markdown("### 👋 Welcome to your Dutch Learning Hub!")
@@ -237,12 +217,12 @@ else:
         st.markdown("")
 
         col1, col2 = st.columns(2)
-
+        
         with col1:
             if st.button("📚 **Vocabulary Browser**\n\nBrowse, search, and manage your custom lists and categories.", use_container_width=True):
                 st.session_state.app_mode = "📚 Vocabulary Browser"
                 st.rerun()
-
+            
             st.markdown("")
             if st.button("⚡ **Quick Match Game**\n\nTest your speed and reflexes with quick-fire translations.", use_container_width=True):
                 st.session_state.app_mode = "⚡ Quick Match Game"
@@ -252,7 +232,7 @@ else:
             if st.button("🃏 **Flashcard Practice**\n\nFlip through randomized cards to drill down on memory.", use_container_width=True):
                 st.session_state.app_mode = "🃏 Flashcard Practice"
                 st.rerun()
-
+            
             st.markdown("")
             if st.button("📝 **Custom Exam**\n\nTake an AI-powered test tailored specifically to your words.", use_container_width=True):
                 st.session_state.app_mode = "📝 Custom Exam"
@@ -261,7 +241,7 @@ else:
     elif st.session_state.app_mode == "📚 Vocabulary Browser":
         st.header("📚 Vocabulary Browser & Management")
         st.markdown(f"Currently viewing list: **{selected_category}** (Total words: {len(active_df)})")
-
+        
         search_query = st.text_input("🔍 Search vocabulary...", "")
         if search_query:
             mask = active_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)
@@ -284,18 +264,18 @@ else:
             use_container_width=True,
             hide_index=True
         )
-
+        
         st.markdown("---")
         st.subheader("🗑️ Delete a Word")
         if not active_df.empty:
             word_options = [f"{row['Dutch']} = {row['English']} ({row['Category']})" for _, row in active_df.iterrows()]
             selected_to_delete = st.selectbox("Select word to remove", options=word_options)
-
+            
             if st.button("Delete Selected Word"):
                 dutch_to_del = selected_to_delete.split(" = ")[0]
                 df_filtered = df[df['Dutch'] != dutch_to_del]
-                df_filtered.to_csv(default_csv, index=False, sep=';')
-                st.success(f"Successfully deleted **{dutch_to_del}**!")
+                conn.update(data=df_filtered)
+                st.success(f"Successfully deleted **{dutch_to_del}** from cloud storage!")
                 st.rerun()
         else:
             st.info("No words available to delete in this category.")
@@ -312,7 +292,7 @@ else:
 
             actual_row_idx = st.session_state.flashcard_order[st.session_state.flashcard_idx]
             current_row = active_df.iloc[actual_row_idx]
-
+            
             dutch_word = str(current_row['Dutch'])
             english_translation = str(current_row['English'])
 
@@ -320,7 +300,7 @@ else:
             card_label = f"English Translation" if st.session_state.show_back else f"Dutch Word ({current_row['Category']})"
 
             st.markdown(f"### Card {st.session_state.flashcard_idx + 1} of {len(active_df)}")
-
+            
             st.markdown(f"""
                 <div style="background-color: #ffffff; border: 2px solid #cbd5e1; border-radius: 16px; padding: 40px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.02); margin-bottom: 20px;">
                     <span style="font-size: 13px; color: #64748b; font-weight: bold; text-transform: uppercase; letter-spacing: 1px;">{card_label}</span>
@@ -370,7 +350,7 @@ else:
                     st.session_state.game_max_score = num_rounds * 10
                     st.session_state.game_history = []
                     st.session_state.game_active = True
-
+                    
                     row = st.session_state.game_questions[0]
                     correct = str(row['English'])
                     distractors = active_df[active_df['English'] != correct]['English'].astype(str).sample(n=min(3, len(active_df)-1)).tolist()
@@ -388,7 +368,7 @@ else:
                     correct_answer = str(row['English'])
 
                     st.progress((curr_idx) / len(q_list), text=f"Question {curr_idx + 1} of {len(q_list)}")
-
+                    
                     st.markdown(f"""
                         <div style="background-color: #ffffff; border: 2px solid #cbd5e1; border-radius: 12px; padding: 20px; text-align: center;">
                             <span style="font-size: 14px; color: #64748b; font-weight: bold;">Translate this word:</span><br>
@@ -416,7 +396,7 @@ else:
                                 "correct_answer": correct_answer,
                                 "is_correct": is_correct
                             })
-
+                            
                             st.session_state.game_idx += 1
                             if st.session_state.game_idx < len(q_list):
                                 next_row = q_list[st.session_state.game_idx]
@@ -461,7 +441,7 @@ else:
     elif st.session_state.app_mode == "📝 Custom Exam":
         st.header("📝 Custom Exam Generator")
         st.markdown(f"Exam category scope: **{selected_category}**")
-
+        
         if not api_key:
             st.warning("⚠️ Please enter your Gemini API key in the sidebar to generate exams.")
         elif len(active_df) == 0:
@@ -486,7 +466,7 @@ else:
                 {vocab_string}
 
                 Mix the question types so that some questions use multiple-choice options (with 4 options) and some questions require a text-based translation input.
-
+                
                 Return ONLY a valid JSON object with a key "questions" containing a list of objects. Each object must have:
                 - "id": integer starting from 1
                 - "question": string (the exam question)
@@ -516,7 +496,7 @@ else:
 
                 for idx, q in enumerate(questions):
                     st.markdown(f"**Question {idx + 1}:** {q['question']}")
-
+                    
                     q_type = q.get("type", "multiple_choice")
                     if q_type == "multiple_choice" and q.get("options"):
                         user_answers[idx] = st.radio(

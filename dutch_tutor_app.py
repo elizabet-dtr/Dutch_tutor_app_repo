@@ -116,13 +116,33 @@ if "app_mode" not in st.session_state:
     st.session_state.app_mode = "🏠 Home Dashboard"
 
 # ==========================================
-# SIDEBAR: ALWAYS VISIBLE ADD WORD FORM & MENU
+# SIDEBAR: NAVIGATION, LOOKUP, & ADD WORD
 # ==========================================
 st.sidebar.markdown("---")
 if st.sidebar.button("🏠 Return to Home Hub", use_container_width=True):
     st.session_state.app_mode = "🏠 Home Dashboard"
     st.rerun()
 
+# --- AI WORD TRANSLATOR & CHECKER TOOL ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 AI Word Lookup & Checker")
+lookup_query = st.sidebar.text_input("Type word to check (Dutch or English)")
+
+if st.sidebar.button("Translate & Check"):
+    if not api_key:
+        st.sidebar.warning("⚠️ Enter Gemini API key above first.")
+    elif not lookup_query.strip():
+        st.sidebar.warning("⚠️ Type a word to look up.")
+    else:
+        try:
+            client = genai.Client(api_key=api_key)
+            prompt = f"Translate and explain this word/phrase ('{lookup_query}') between Dutch and English. Give the translation, article (de/het if Dutch noun), and a short example sentence. Keep it concise."
+            response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
+            st.sidebar.info(response.text)
+        except Exception as e:
+            st.sidebar.error(f"Lookup error: {e}")
+
+# --- ADD NEW WORD FORM ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Add New Word & List")
 
@@ -322,7 +342,7 @@ else:
                     st.rerun()
 
     # ==========================================
-    # 3. MATCH GAME (With Mistake Breakdown & Detailed Stats)
+    # 3. MATCH GAME
     # ==========================================
     elif st.session_state.app_mode == "⚡ Quick Match Game":
         st.header("⚡ Quick Match Challenge")
@@ -382,7 +402,6 @@ else:
                             else:
                                 st.error(f"❌ Incorrect! The correct answer was: **{correct_answer}**")
 
-                            # Log for end-of-game statistics
                             st.session_state.game_history.append({
                                 "dutch": dutch_target,
                                 "user_choice": selected,
@@ -416,7 +435,6 @@ else:
 
                     st.markdown("<br>", unsafe_allow_html=True)
 
-                    # Statistics & Review Section
                     if wrong_answers:
                         st.subheader("❌ Review Your Mistakes")
                         st.markdown("Here are the words you got wrong in this round so you can review them:")

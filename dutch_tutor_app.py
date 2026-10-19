@@ -5,6 +5,8 @@ import random
 from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- PAGE CONFIGURATION & CLEAN NEUTRAL STYLING ---
 st.set_page_config(page_title="My Dutch Studio", page_icon="🇳🇱", layout="wide")
@@ -51,7 +53,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🇳🇱 My Personal Dutch Learning Studio")
+st.title("🇳🇱 My Personal Dutch Learning Hub")
 st.markdown("*Your customized, private sanctuary for mastering the Dutch language.*")
 
 # --- SECURE API KEY LOADING WITH SAFE LOCAL FALLBACK ---
@@ -65,8 +67,30 @@ except Exception:
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- GOOGLE SHEETS CONNECTION ---
+# --- GOOGLE SHEETS CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
+
+def get_gspread_spreadsheet():
+    """Helper to get the raw gspread spreadsheet object for advanced tab operations."""
+    try:
+        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        credentials_dict = dict(st.secrets["connections"]["gsheets"])
+        spreadsheet_url = credentials_dict.pop("spreadsheet")
+        creds = Credentials.from_service_account_info(credentials_dict, scopes=scope)
+        client = gspread.authorize(creds)
+        return client.open_by_url(spreadsheet_url)
+    except Exception:
+        return None
+
+def get_all_worksheet_names():
+    """Fetches all actual tab names directly from the Google Sheet."""
+    try:
+        spreadsheet = get_gspread_spreadsheet()
+        if spreadsheet:
+            return [ws.title for ws in spreadsheet.worksheets()]
+    except Exception:
+        pass
+    return ["Sheet1"]
 
 def load_vocab_from_worksheet(worksheet_name="Sheet1"):
     """Reads vocabulary from a specific tab/worksheet in Google Sheets."""
@@ -89,10 +113,13 @@ def load_vocab_from_worksheet(worksheet_name="Sheet1"):
 
 # --- SESSION STATE INITIALIZATION ---
 if "available_sheets" not in st.session_state:
-    st.session_state.available_sheets = ["Sheet1", "General", "Verbs", "Nouns", "Phrases"]
+    st.session_state.available_sheets = get_all_worksheet_names()
 
 if "selected_worksheet" not in st.session_state:
-    st.session_state.selected_worksheet = st.session_state.available_sheets[0]
+    if st.session_state.available_sheets:
+        st.session_state.selected_worksheet = st.session_state.available_sheets[0]
+    else:
+        st.session_state.selected_worksheet = "Sheet1"
 
 if "exam_data" not in st.session_state:
     st.session_state.exam_data = None
@@ -158,10 +185,17 @@ if st.sidebar.button("🏠 Return to Home Hub", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Select Category / Sheet")
 
+# Refresh list of sheets from cloud
+st.session_state.available_sheets = get_all_worksheet_names()
+
+current_idx = 0
+if st.session_state.selected_worksheet in st.session_state.available_sheets:
+    current_idx = st.session_state.available_sheets.index(st.session_state.selected_worksheet)
+
 selected_sheet = st.sidebar.selectbox(
     "Choose Google Sheet Tab:",
     options=st.session_state.available_sheets,
-    index=st.session_state.available_sheets.index(st.session_state.selected_worksheet) if st.session_state.selected_worksheet in st.session_state.available_sheets else 0
+    index=current_idx
 )
 
 if selected_sheet != st.session_state.selected_worksheet:
@@ -183,16 +217,18 @@ with st.sidebar.expander("✏️ **Rename Current Sheet**"):
             st.sidebar.warning(f"A sheet named '{clean_renamed}' already exists.")
         else:
             try:
-                # 1. Write current active data into the target worksheet
-                conn.update(worksheet=clean_renamed, data=active_df)
-                
-                # 2. Update list in session state
-                idx = st.session_state.available_sheets.index(old_name)
-                st.session_state.available_sheets[idx] = clean_renamed
-                st.session_state.selected_worksheet = clean_renamed
-                
-                st.sidebar.success(f"Renamed sheet to **'{clean_renamed}'** successfully!")
-                st.rerun()
+                spreadsheet = get_gspread_spreadsheet()
+                if spreadsheet:
+                    worksheet = spreadsheet.worksheet(old_name)
+                    worksheet.update_title(clean_renamed)
+                    
+                    st.session_state.available_sheets = get_all_worksheet_names()
+                    st.session_state.selected_worksheet = clean_renamed
+                    
+                    st.sidebar.success(f"Renamed sheet to **'{clean_renamed}'** successfully!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("Could not connect to Google Sheets API.")
             except Exception as ex:
                 st.sidebar.error(f"Failed to rename sheet: {str(ex)}")
 
@@ -208,13 +244,20 @@ if st.sidebar.button("Create Sheet Tab"):
     elif clean_sheet_name in st.session_state.available_sheets:
         st.sidebar.warning(f"Sheet '{clean_sheet_name}' already exists.")
     else:
-        empty_df = pd.DataFrame(columns=['Dutch', 'English'])
         try:
-            conn.update(worksheet=clean_sheet_name, data=empty_df)
-            st.session_state.available_sheets.append(clean_sheet_name)
-            st.session_state.selected_worksheet = clean_sheet_name
-            st.sidebar.success(f"Created new worksheet: **{clean_sheet_name}**!")
-            st.rerun()
+            spreadsheet = get_gspread_spreadsheet()
+            if spreadsheet:
+                spreadsheet.add_worksheet(title=clean_sheet_name, rows=100, cols=2)
+                # Initialize headers
+                empty_df = pd.DataFrame(columns=['Dutch', 'English'])
+                conn.update(worksheet=clean_sheet_name, data=empty_df)
+                
+                st.session_state.available_sheets = get_all_worksheet_names()
+                st.session_state.selected_worksheet = clean_sheet_name
+                st.sidebar.success(f"Created new worksheet: **{clean_sheet_name}**!")
+                st.rerun()
+            else:
+                st.sidebar.error("Could not connect to Google Sheets API.")
         except Exception as e:
             st.sidebar.error(f"Error creating new sheet tab: {e}")
 
@@ -273,7 +316,7 @@ if st.session_state.app_mode == "🏠 Home Dashboard":
             st.rerun()
 
 # ==========================================
-# 1. LEARNING MODE (VOCABULARY BROWSER V4.1)
+# 1. LEARNING MODE (VOCABULARY BROWSER V4.2)
 # ==========================================
 elif st.session_state.app_mode == "📚 Vocabulary Browser":
     st.header(f"📚 Worksheet: '{st.session_state.selected_worksheet}'")

@@ -1,8 +1,15 @@
-Dutch;English;Category
-tafel;table;General
-vogel;bird;General
-spelen;play;General
-zus;sister;General
-opa;grandfather;General
-verdrietig;sad;List 1
-staart;tail;List 1
+﻿Dutch,English,Category
+tafel,table,General
+vogel,bird,General
+spelen,play,General
+zus,sister,General
+opa,grandfather,General
+verdrietig,sad,List 1
+staart,tail,List 1
+kwispelen,to wag (a tail),List 1
+mee,along (with),List 1
+betekenen,to mean / to signify,List 1
+blij,happy / glad /pleased,List 1
+ziet,sees,List 1
+want,because,List 1
+geven (geeft),give,List 1

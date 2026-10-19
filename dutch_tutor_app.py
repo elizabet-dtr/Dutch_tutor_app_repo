@@ -54,8 +54,9 @@ except Exception:
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- CATEGORY-AWARE CSV LOADING ---
-default_csv = "dutch_vocab.csv"
+# --- ABSOLUTE PATH TO PREVENT CSV MISPLACEMENT ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+default_csv = os.path.join(BASE_DIR, "dutch_vocab.csv")
 
 def load_vocab():
     if os.path.exists(default_csv):
@@ -140,9 +141,9 @@ if st.sidebar.button("Translate & Check"):
             response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt)
             st.sidebar.info(response.text)
         except Exception as e:
-            st.sidebar.error(f"Lookup error: {e}")
+            st.sidebar.error(f"Lookup error (Rate limit or quota reached): {e}")
 
-# --- ADD NEW WORD FORM ---
+# --- ADD NEW WORD FORM (WITH ABSOLUTE PATH & RELOAD) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ Add New Word & List")
 
@@ -164,28 +165,47 @@ with st.sidebar.form(key="add_word_form", clear_on_submit=False):
         if not new_english.strip():
             errors.append("English translation is missing.")
 
+        clean_dutch = new_dutch.strip().replace(';', '')
+        clean_english = new_english.strip().replace(';', '')
+
+        if not errors and not df.empty and 'Dutch' in df.columns:
+            existing_dutch_words = df['Dutch'].astype(str).str.strip().str.lower().tolist()
+            if clean_dutch.lower() in existing_dutch_words:
+                errors.append(f"'{clean_dutch}' is already in your vocabulary list!")
+
         if errors:
             for err in errors:
-                st.sidebar.error(f"⚠️ {err}")
+                st.sidebar.warning(f"⚠️ {err}")
         else:
-            clean_dutch = new_dutch.strip().replace(';', '')
-            clean_english = new_english.strip().replace(';', '')
-
             if category_choice == "➕ Add New Category...":
                 final_category = new_category_input.strip().replace(';', '') if new_category_input.strip() else "General"
             else:
                 final_category = category_choice
 
-            new_line = f"{clean_dutch};{clean_english};{final_category}\n"
+            new_row = pd.DataFrame([{'Dutch': clean_dutch, 'English': clean_english, 'Category': final_category}])
 
-            file_exists = os.path.exists(default_csv)
-            with open(default_csv, 'a', encoding='utf-8') as f:
-                if not file_exists:
-                    f.write("Dutch;English;Category\n")
-                f.write(new_line)
+            if os.path.exists(default_csv):
+                updated_df = pd.concat([df, new_row], ignore_index=True)
+            else:
+                updated_df = new_row
 
-            st.sidebar.success(f"Added: **{clean_dutch}** = *{clean_english}* [{final_category}]!")
+            updated_df.to_csv(default_csv, index=False, sep=';')
+
+            st.sidebar.success(f"Added successfully: **{clean_dutch}** = *{clean_english}* [{final_category}]!")
             st.rerun()
+
+# --- BACKUP / SYNC TOOL (PREVENTS DATA LOSS ON REDEPLOY) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("💾 Cloud Data Backup")
+if os.path.exists(default_csv):
+    with open(default_csv, "rb") as f:
+        st.sidebar.download_button(
+            label="📥 Download Latest CSV",
+            data=f,
+            file_name="dutch_vocab.csv",
+            mime="text/csv",
+            help="Download the current vocabulary file containing all words added on the live app."
+        )
 
 # --- SIDEBAR: CATEGORY FILTER FOR STUDY MODES ---
 st.sidebar.markdown("---")
@@ -211,9 +231,6 @@ if "flashcard_order" not in st.session_state or len(st.session_state.flashcard_o
 if df.empty:
     st.warning("⚠️ Your vocabulary file is empty or missing. Use the sidebar on the left to add your first word and start your studio!")
 else:
-    # ==========================================
-    # 0. HOME DASHBOARD
-    # ==========================================
     if st.session_state.app_mode == "🏠 Home Dashboard":
         st.markdown("### 👋 Welcome to your Dutch Learning Hub!")
         st.markdown("Select a module below to begin your session:")
@@ -241,9 +258,6 @@ else:
                 st.session_state.app_mode = "📝 Custom Exam"
                 st.rerun()
 
-    # ==========================================
-    # 1. LEARNING MODE (Vocabulary Browser)
-    # ==========================================
     elif st.session_state.app_mode == "📚 Vocabulary Browser":
         st.header("📚 Vocabulary Browser & Management")
         st.markdown(f"Currently viewing list: **{selected_category}** (Total words: {len(active_df)})")
@@ -286,9 +300,6 @@ else:
         else:
             st.info("No words available to delete in this category.")
 
-    # ==========================================
-    # 2. FLASHCARD MODE
-    # ==========================================
     elif st.session_state.app_mode == "🃏 Flashcard Practice":
         st.header("🃏 Flashcard Practice Studio")
         st.markdown(f"Studying category: **{selected_category}** (Randomized order)")
@@ -341,9 +352,6 @@ else:
                     st.session_state.show_back = False
                     st.rerun()
 
-    # ==========================================
-    # 3. MATCH GAME
-    # ==========================================
     elif st.session_state.app_mode == "⚡ Quick Match Game":
         st.header("⚡ Quick Match Challenge")
         st.markdown(f"Playing category: **{selected_category}**")
@@ -450,9 +458,6 @@ else:
                         st.session_state.game_active = False
                         st.rerun()
 
-    # ==========================================
-    # 4. CUSTOM EXAM MODE
-    # ==========================================
     elif st.session_state.app_mode == "📝 Custom Exam":
         st.header("📝 Custom Exam Generator")
         st.markdown(f"Exam category scope: **{selected_category}**")

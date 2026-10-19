@@ -172,30 +172,29 @@ if selected_sheet != st.session_state.selected_worksheet:
 with st.sidebar.expander("✏️ **Rename Current Sheet**"):
     renamed_input = st.text_input("New Name for Active Sheet", value=st.session_state.selected_worksheet)
     if st.button("Save New Sheet Name"):
-        clean_renamed = renamed_input.strip()
+        clean_renamed = str(renamed_input).strip()
+        old_name = st.session_state.selected_worksheet
+
         if not clean_renamed:
-            st.warning("Please enter a valid sheet name.")
-        elif clean_renamed == st.session_state.selected_worksheet:
-            st.info("The name is identical to the current name.")
+            st.sidebar.warning("Please enter a valid sheet name.")
+        elif clean_renamed == old_name:
+            st.sidebar.info("The name is identical to the current name.")
         elif clean_renamed in st.session_state.available_sheets:
-            st.warning(f"A sheet named '{clean_renamed}' already exists.")
+            st.sidebar.warning(f"A sheet named '{clean_renamed}' already exists.")
         else:
-            old_name = st.session_state.selected_worksheet
             try:
-                # Copy current dataframe over to new worksheet name
+                # 1. Write current active data into the target worksheet
                 conn.update(worksheet=clean_renamed, data=active_df)
-                # Clear old worksheet
-                conn.update(worksheet=old_name, data=pd.DataFrame(columns=['Dutch', 'English']))
                 
-                # Update list in session state
+                # 2. Update list in session state
                 idx = st.session_state.available_sheets.index(old_name)
                 st.session_state.available_sheets[idx] = clean_renamed
                 st.session_state.selected_worksheet = clean_renamed
                 
-                st.success(f"Renamed sheet **'{old_name}'** to **'{clean_renamed}'**!")
+                st.sidebar.success(f"Renamed sheet to **'{clean_renamed}'** successfully!")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Error renaming worksheet: {e}")
+            except Exception as ex:
+                st.sidebar.error(f"Failed to rename sheet: {str(ex)}")
 
 # --- SIDEBAR: CREATE NEW SHEET / CATEGORY ---
 st.sidebar.markdown("---")

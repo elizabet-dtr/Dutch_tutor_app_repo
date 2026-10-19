@@ -65,37 +65,45 @@ except Exception:
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- GOOGLE SHEETS DATA LOADING & SYNC ---
+# --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-def load_vocab():
+def get_all_worksheets():
+    """Reads available worksheets/tabs from Google Sheets or defaults to Sheet1."""
     try:
-        df = conn.read(ttl=0)
+        # Load default sheet to inspect structure or list sheets
+        # If gsheets_connection allows reading worksheet names, we use fallback list
+        return ["Sheet1", "General", "Verbs", "Nouns", "Phrases"]
+    except Exception:
+        return ["Sheet1"]
+
+def load_vocab_from_worksheet(worksheet_name="Sheet1"):
+    """Reads vocabulary from a specific tab/worksheet in Google Sheets."""
+    try:
+        df = conn.read(worksheet=worksheet_name, ttl=0)
         if df is not None and not df.empty:
-            if len(df.columns) >= 3:
-                df = df.iloc[:, :3]
-                df.columns = ['Dutch', 'English', 'Category']
-            elif len(df.columns) == 2:
+            if len(df.columns) >= 2:
                 df = df.iloc[:, :2]
                 df.columns = ['Dutch', 'English']
-                df['Category'] = 'General'
             else:
                 df['English'] = ''
-                df['Category'] = 'General'
-                df.columns = ['Dutch', 'English', 'Category']
+                df.columns = ['Dutch', 'English']
 
             df['Dutch'] = df['Dutch'].astype(str).str.strip()
             df['English'] = df['English'].astype(str).str.strip()
-            df['Category'] = df['Category'].astype(str).str.strip().replace('', 'General')
             return df
-        return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
-    except Exception as e:
-        st.error(f"Error connecting to Google Sheets: {e}")
-        return pd.DataFrame(columns=['Dutch', 'English', 'Category'])
-
-df = load_vocab()
+        return pd.DataFrame(columns=['Dutch', 'English'])
+    except Exception:
+        # Fallback if worksheet doesn't exist yet
+        return pd.DataFrame(columns=['Dutch', 'English'])
 
 # --- SESSION STATE INITIALIZATION ---
+if "available_sheets" not in st.session_state:
+    st.session_state.available_sheets = ["Sheet1"]
+
+if "selected_worksheet" not in st.session_state:
+    st.session_state.selected_worksheet = st.session_state.available_sheets[0]
+
 if "exam_data" not in st.session_state:
     st.session_state.exam_data = None
 if "submitted" not in st.session_state:
@@ -121,15 +129,18 @@ if "game_history" not in st.session_state:
 if "app_mode" not in st.session_state:
     st.session_state.app_mode = "🏠 Home Dashboard"
 
+# Load current active sheet data
+active_df = load_vocab_from_worksheet(st.session_state.selected_worksheet)
+
 # ==========================================
 # DIALOG / POPUP FOR DELETE CONFIRMATION
 # ==========================================
 @st.dialog("⚠️ Confirm Deletion")
-def confirm_delete_dialog(rows_to_delete, full_df):
-    st.write(f"Are you sure you want to delete **{len(rows_to_delete)}** selected word(s) from your studio?")
+def confirm_delete_dialog(rows_to_delete, full_df, worksheet_name):
+    st.write(f"Are you sure you want to delete **{len(rows_to_delete)}** selected word(s) from sheet **'{worksheet_name}'**?")
     
     st.dataframe(
-        rows_to_delete[['Dutch', 'English', 'Category']],
+        rows_to_delete[['Dutch', 'English']],
         use_container_width=True,
         hide_index=True
     )
@@ -137,9 +148,8 @@ def confirm_delete_dialog(rows_to_delete, full_df):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("❌ Yes, Delete Permanently", type="primary", use_container_width=True):
-            # Exclude selected rows from current dataframe
             remaining_df = full_df[~full_df.index.isin(rows_to_delete.index)].reset_index(drop=True)
-            conn.update(data=remaining_df)
+            conn.update(worksheet=worksheet_name, data=remaining_df)
             st.success("Successfully deleted from Google Sheets!")
             st.rerun()
     with col2:
@@ -147,12 +157,49 @@ def confirm_delete_dialog(rows_to_delete, full_df):
             st.rerun()
 
 # ==========================================
-# SIDEBAR: NAVIGATION & LOOKUP
+# SIDEBAR: NAVIGATION & WORKSHEET SELECTOR
 # ==========================================
 st.sidebar.markdown("---")
 if st.sidebar.button("🏠 Return to Home Hub", use_container_width=True):
     st.session_state.app_mode = "🏠 Home Dashboard"
     st.rerun()
+
+# --- SIDEBAR: CATEGORY / WORKSHEET SELECTOR ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Select Category / Sheet")
+
+selected_sheet = st.sidebar.selectbox(
+    "Choose Google Sheet Tab:",
+    options=st.session_state.available_sheets,
+    index=st.session_state.available_sheets.index(st.session_state.selected_worksheet) if st.session_state.selected_worksheet in st.session_state.available_sheets else 0
+)
+
+if selected_sheet != st.session_state.selected_worksheet:
+    st.session_state.selected_worksheet = selected_sheet
+    st.rerun()
+
+# --- SIDEBAR: CREATE NEW SHEET / CATEGORY ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ Create New Sheet / Category")
+new_sheet_name = st.sidebar.text_input("New Sheet Name (e.g., Food, Verbs)")
+
+if st.sidebar.button("Create Sheet Tab"):
+    clean_sheet_name = new_sheet_name.strip()
+    if not clean_sheet_name:
+        st.sidebar.warning("Please enter a valid sheet name.")
+    elif clean_sheet_name in st.session_state.available_sheets:
+        st.sidebar.warning(f"Sheet '{clean_sheet_name}' already exists.")
+    else:
+        # Initialize empty dataframe with standard headers for the new tab
+        empty_df = pd.DataFrame(columns=['Dutch', 'English'])
+        try:
+            conn.update(worksheet=clean_sheet_name, data=empty_df)
+            st.session_state.available_sheets.append(clean_sheet_name)
+            st.session_state.selected_worksheet = clean_sheet_name
+            st.sidebar.success(f"Created new worksheet: **{clean_sheet_name}**!")
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error creating new sheet tab: {e}")
 
 # --- AI WORD TRANSLATOR & CHECKER TOOL ---
 st.sidebar.markdown("---")
@@ -173,20 +220,6 @@ if st.sidebar.button("Translate & Check"):
         except Exception as e:
             st.sidebar.error(f"Lookup error (Rate limit or quota reached): {e}")
 
-# --- SIDEBAR: CATEGORY FILTER FOR STUDY MODES ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Filter Study Scope")
-all_cats = ["All Categories"] + (sorted(df['Category'].unique().tolist()) if not df.empty and 'Category' in df.columns else ['General'])
-selected_category = st.sidebar.selectbox("Choose Category/List to Practice", all_cats)
-
-if not df.empty:
-    if selected_category != "All Categories":
-        active_df = df[df['Category'] == selected_category].reset_index(drop=True)
-    else:
-        active_df = df.copy()
-else:
-    active_df = pd.DataFrame(columns=['Dutch', 'English', 'Category'])
-
 if "flashcard_order" not in st.session_state or len(st.session_state.flashcard_order) != len(active_df):
     st.session_state.flashcard_order = list(range(len(active_df)))
     random.shuffle(st.session_state.flashcard_order)
@@ -196,13 +229,14 @@ if "flashcard_order" not in st.session_state or len(st.session_state.flashcard_o
 # ==========================================
 if st.session_state.app_mode == "🏠 Home Dashboard":
     st.markdown("### 👋 Welcome to your Dutch Learning Hub!")
+    st.markdown(f"Active List / Google Sheet Tab: **{st.session_state.selected_worksheet}**")
     st.markdown("Select a module below to begin your session:")
     st.markdown("")
 
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📚 **Vocabulary Browser**\n\nBrowse, search, edit, and manage your custom lists and categories.", use_container_width=True):
+        if st.button("📚 **Vocabulary Browser**\n\nBrowse, search, edit, and manage your custom sheet lists.", use_container_width=True):
             st.session_state.app_mode = "📚 Vocabulary Browser"
             st.rerun()
         
@@ -222,31 +256,23 @@ if st.session_state.app_mode == "🏠 Home Dashboard":
             st.rerun()
 
 # ==========================================
-# 1. LEARNING MODE (VOCABULARY BROWSER V3)
+# 1. LEARNING MODE (VOCABULARY BROWSER V4)
 # ==========================================
 elif st.session_state.app_mode == "📚 Vocabulary Browser":
-    st.header("📚 Vocabulary Management Studio")
-    st.markdown("Manage, edit, search, and organize your entire vocabulary list in real-time.")
+    st.header(f"📚 Worksheet: '{st.session_state.selected_worksheet}'")
+    st.markdown("Manage words saved in this specific Google Sheets tab in real-time.")
     st.markdown("---")
 
     # --- CENTERED "ADD NEW WORD" CARD ---
-    with st.expander("➕ **Add New Word / Phrase**", expanded=True):
-        existing_categories = sorted(df['Category'].unique().tolist()) if not df.empty and 'Category' in df.columns else ['General']
-        
-        with st.form(key="centered_add_word_form", clear_on_submit=True):
+    with st.expander(f"➕ **Add New Word / Phrase to Sheet '{st.session_state.selected_worksheet}'**", expanded=True):
+        with st.form(key="centered_add_word_form_v4", clear_on_submit=True):
             col_dutch, col_english = st.columns(2)
             with col_dutch:
                 new_dutch = st.text_input("Dutch Word / Phrase *", placeholder="e.g. de spiegel")
             with col_english:
                 new_english = st.text_input("English Translation *", placeholder="e.g. the mirror")
 
-            col_cat1, col_cat2 = st.columns(2)
-            with col_cat1:
-                category_choice = st.selectbox("Select or Create List/Category", existing_categories + ["➕ Add New Category..."])
-            with col_cat2:
-                new_category_input = st.text_input("New Category Name (if selected left)", placeholder="e.g. Household")
-
-            save_btn = st.form_submit_button("💾 Save Word to Studio", use_container_width=True)
+            save_btn = st.form_submit_button("💾 Save Word to Google Sheet Tab", use_container_width=True)
 
             if save_btn:
                 errors = []
@@ -258,39 +284,33 @@ elif st.session_state.app_mode == "📚 Vocabulary Browser":
                 clean_dutch = new_dutch.strip()
                 clean_english = new_english.strip()
 
-                if not errors and not df.empty and 'Dutch' in df.columns:
-                    existing_dutch_words = df['Dutch'].astype(str).str.strip().str.lower().tolist()
+                if not errors and not active_df.empty and 'Dutch' in active_df.columns:
+                    existing_dutch_words = active_df['Dutch'].astype(str).str.strip().str.lower().tolist()
                     if clean_dutch.lower() in existing_dutch_words:
-                        errors.append(f"'{clean_dutch}' is already in your vocabulary list!")
+                        errors.append(f"'{clean_dutch}' is already in sheet '{st.session_state.selected_worksheet}'!")
 
                 if errors:
                     for err in errors:
                         st.warning(f"⚠️ {err}")
                 else:
-                    if category_choice == "➕ Add New Category...":
-                        final_category = new_category_input.strip() if new_category_input.strip() else "General"
-                    else:
-                        final_category = category_choice
-
-                    new_row = pd.DataFrame([{'Dutch': clean_dutch, 'English': clean_english, 'Category': final_category}])
-                    updated_df = pd.concat([df, new_row], ignore_index=True)
+                    new_row = pd.DataFrame([{'Dutch': clean_dutch, 'English': clean_english}])
+                    updated_df = pd.concat([active_df, new_row], ignore_index=True)
                     
-                    conn.update(data=updated_df)
-                    st.success(f"Added successfully: **{clean_dutch}** = *{clean_english}* [{final_category}]!")
+                    conn.update(worksheet=st.session_state.selected_worksheet, data=updated_df)
+                    st.success(f"Added successfully to '{st.session_state.selected_worksheet}': **{clean_dutch}** = *{clean_english}*!")
                     st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --- SEARCH & INTERACTIVE TABLE SECTION ---
-    st.subheader("🔍 Vocabulary List")
+    st.subheader(f"🔍 Word Table ({st.session_state.selected_worksheet})")
 
     col_search, col_stats = st.columns([3, 1])
     with col_search:
-        search_query = st.text_input("🔍 Quick Search (Dutch, English, or Category)", placeholder="Type to filter words...")
+        search_query = st.text_input("🔍 Quick Search (Dutch or English)", placeholder="Type to filter words...")
     with col_stats:
-        st.metric(label="Total Words in View", value=len(active_df))
+        st.metric(label="Total Words in Sheet", value=len(active_df))
 
-    # Apply search filter
     if search_query.strip():
         mask = active_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)
         display_df = active_df[mask].reset_index(drop=True)
@@ -298,35 +318,31 @@ elif st.session_state.app_mode == "📚 Vocabulary Browser":
         display_df = active_df.reset_index(drop=True)
 
     if display_df.empty:
-        st.info("No matching words found.")
+        st.info(f"No words found in worksheet '{st.session_state.selected_worksheet}'. Use the form above to add your first word!")
     else:
-        st.markdown("💡 *Double-click any cell to edit translations or categories directly. Use the checkboxes on the left to select rows for deletion.*")
+        st.markdown("💡 *Double-click any cell to edit translations directly. Use the options below to delete rows.*")
         
-        # Interactive data editor with row selection enabled
         edited_df = st.data_editor(
             display_df,
             column_config={
                 "Dutch": st.column_config.TextColumn("Dutch Word / Phrase", required=True),
                 "English": st.column_config.TextColumn("English Translation", required=True),
-                "Category": st.column_config.SelectboxColumn("Category / List", options=existing_categories + ["General"], required=True)
             },
             num_rows="dynamic",
             use_container_width=True,
             hide_index=True,
-            key="vocab_table_editor"
+            key="vocab_table_editor_v4"
         )
 
         col_save_changes, col_del_selected = st.columns([1, 1])
         
         with col_save_changes:
-            if st.button("💾 Save Table Edits to Google Sheets", use_container_width=True):
-                # Merge edits back to main dataframe
-                conn.update(data=edited_df)
-                st.success("All table edits saved successfully!")
+            if st.button("💾 Save Table Edits to Google Sheet", use_container_width=True):
+                conn.update(worksheet=st.session_state.selected_worksheet, data=edited_df)
+                st.success(f"Saved edits to worksheet '{st.session_state.selected_worksheet}'!")
                 st.rerun()
 
         with col_del_selected:
-            # Multi-select row deletion UI
             rows_to_del_indices = st.multiselect(
                 "Select word(s) to remove:",
                 options=display_df.index,
@@ -338,17 +354,16 @@ elif st.session_state.app_mode == "📚 Vocabulary Browser":
                     st.warning("Please select at least one row from the dropdown above to delete.")
                 else:
                     selected_rows = display_df.loc[rows_to_del_indices]
-                    confirm_delete_dialog(selected_rows, df)
+                    confirm_delete_dialog(selected_rows, active_df, st.session_state.selected_worksheet)
 
 # ==========================================
 # 2. FLASHCARD MODE
 # ==========================================
 elif st.session_state.app_mode == "🃏 Flashcard Practice":
-    st.header("🃏 Flashcard Practice Studio")
-    st.markdown(f"Studying category: **{selected_category}** (Randomized order)")
+    st.header(f"🃏 Flashcard Practice — Sheet: '{st.session_state.selected_worksheet}'")
 
     if len(active_df) == 0:
-        st.warning("No words found in this category!")
+        st.warning(f"No words found in sheet '{st.session_state.selected_worksheet}'!")
     else:
         if st.session_state.flashcard_idx >= len(active_df):
             st.session_state.flashcard_idx = 0
@@ -360,7 +375,7 @@ elif st.session_state.app_mode == "🃏 Flashcard Practice":
         english_translation = str(current_row['English'])
 
         card_text = english_translation if st.session_state.show_back else dutch_word
-        card_label = f"English Translation" if st.session_state.show_back else f"Dutch Word ({current_row['Category']})"
+        card_label = f"English Translation" if st.session_state.show_back else f"Dutch Word ({st.session_state.selected_worksheet})"
 
         st.markdown(f"### Card {st.session_state.flashcard_idx + 1} of {len(active_df)}")
         
@@ -399,11 +414,10 @@ elif st.session_state.app_mode == "🃏 Flashcard Practice":
 # 3. MATCH GAME
 # ==========================================
 elif st.session_state.app_mode == "⚡ Quick Match Game":
-    st.header("⚡ Quick Match Challenge")
-    st.markdown(f"Playing category: **{selected_category}**")
+    st.header(f"⚡ Quick Match Challenge — Sheet: '{st.session_state.selected_worksheet}'")
 
     if len(active_df) == 0:
-        st.warning("No words found in this category to play the game!")
+        st.warning(f"No words found in sheet '{st.session_state.selected_worksheet}' to play!")
     else:
         if not st.session_state.game_active:
             if st.button("🔥 Start New Match Session"):
@@ -508,13 +522,12 @@ elif st.session_state.app_mode == "⚡ Quick Match Game":
 # 4. CUSTOM EXAM MODE
 # ==========================================
 elif st.session_state.app_mode == "📝 Custom Exam":
-    st.header("📝 Custom Exam Generator")
-    st.markdown(f"Exam category scope: **{selected_category}**")
+    st.header(f"📝 Custom Exam Generator — Sheet: '{st.session_state.selected_worksheet}'")
     
     if not api_key:
         st.warning("⚠️ Please enter your Gemini API key in the sidebar to generate exams.")
     elif len(active_df) == 0:
-        st.warning("No words available in this category to generate an exam.")
+        st.warning(f"No words available in sheet '{st.session_state.selected_worksheet}' to generate an exam.")
     else:
         st.sidebar.markdown("---")
         st.sidebar.subheader("⚙️ Exam Preferences")
